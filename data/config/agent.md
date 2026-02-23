@@ -14,7 +14,7 @@ llm_model: gpt-4o-mini
 
 # API key — set this before flashing or update via /api/config
 # WARNING: keep this secret — never commit to version control
-llm_api_key: YOUR_API_KEY_HERE
+llm_api_key:
 
 # Custom LLM endpoint (leave empty for provider default)
 # Example for Ollama: http://192.168.1.100:11434/v1/chat/completions

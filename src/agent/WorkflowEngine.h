@@ -8,6 +8,7 @@
 #ifndef NATIVE_BUILD
 #  include <LittleFS.h>
 #  include <Arduino.h>
+#  include <esp_heap_caps.h>
 #endif
 
 // ─────────────────────────────────────────────────────────────────
@@ -169,14 +170,25 @@ inline bool WorkflowEngine::loadFromFile(const char* path) {
     if (!LittleFS.exists(path)) return false;
     File f = LittleFS.open(path, "r");
     if (!f) return false;
-    char buf[4096] = {};
-    size_t n = f.readBytes(buf, sizeof(buf) - 1);
+
+    // Read the file in chunks into a heap-allocated buffer to avoid
+    // a large stack allocation.
+    const size_t BUF_SIZE = 4096;
+    char* buf = (char*)heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM |
+                                        MALLOC_CAP_8BIT);
+    if (!buf) buf = (char*)malloc(BUF_SIZE);  // fallback to DRAM
+    if (!buf) { f.close(); return false; }
+
+    size_t n = f.readBytes(buf, BUF_SIZE - 1);
     f.close();
     buf[n] = '\0';
 
     // Parse multiple workflows separated by "# " headings
     // Each "# name" line starts a new workflow
     const char* p = buf;
+    // Section buffer — sized for one workflow's steps (max WF_MAX_STEPS
+    // steps × ~32 bytes each + name line ≈ 600 bytes; 1 KB is safe).
+    static constexpr size_t SEC_BUF = 1024;
     while (*p) {
         if (*p == '#' && *(p+1) == ' ') {
             // Find end of this workflow section
@@ -186,10 +198,10 @@ inline bool WorkflowEngine::loadFromFile(const char* path) {
                     sectionEnd[2] == ' ') break;
                 ++sectionEnd;
             }
-            // Copy section
+            // Copy section into a stack buffer (bounded to SEC_BUF)
             size_t secLen = (size_t)(sectionEnd - p);
-            if (secLen < sizeof(buf)) {
-                char section[4096];
+            if (secLen < SEC_BUF) {
+                char section[SEC_BUF];
                 memcpy(section, p, secLen);
                 section[secLen] = '\0';
                 Workflow wf = parse(section);
@@ -201,6 +213,7 @@ inline bool WorkflowEngine::loadFromFile(const char* path) {
             if (*p) ++p;
         }
     }
+    free(buf);
     return true;
 #else
     (void)path;

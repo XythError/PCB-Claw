@@ -189,9 +189,6 @@ private:
         String reqBody;
         serializeJson(body, reqBody);
 
-        char authHeader[160];
-        snprintf(authHeader, sizeof(authHeader), "x-api-key: %s", _cfg.api_key);
-
         HTTPClient http;
         http.setTimeout(15000);
         http.begin(endpoint);
