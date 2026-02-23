@@ -26,6 +26,9 @@
 #include "tools/HttpTool.h"
 #include "tools/MemoryTool.h"
 #include "tools/ScriptTool.h"
+#include "tools/FileTool.h"
+#include "tools/MessageTool.h"
+#include "tools/SpawnTool.h"
 
 // Agent
 #include "agent/Agent.h"
@@ -46,12 +49,15 @@ static LaneQueue     laneQueue;
 static ToolRegistry  toolRegistry;
 
 // Tools
-static GpioTool   gpioTool;
-static I2cTool    i2cTool;
-static SpiTool    spiTool;
-static HttpTool   httpTool;
-static MemoryTool memoryTool;
-static ScriptTool scriptTool;
+static GpioTool    gpioTool;
+static I2cTool     i2cTool;
+static SpiTool     spiTool;
+static HttpTool    httpTool;
+static MemoryTool  memoryTool;
+static ScriptTool  scriptTool;
+static FileTool    fileTool;
+static MessageTool messageTool(&gateway);
+static SpawnTool   spawnTool(&laneQueue);
 
 // Channels (created after config is loaded for WiFi credentials)
 static SerialChannel* serialChannel  = nullptr;
@@ -116,6 +122,9 @@ void setup() {
     toolRegistry.add(&httpTool);
     toolRegistry.add(&memoryTool);
     toolRegistry.add(&scriptTool);
+    toolRegistry.add(&fileTool);
+    toolRegistry.add(&messageTool);
+    toolRegistry.add(&spawnTool);
 
     // Initialise tools that need hardware setup
     i2cTool.begin();
