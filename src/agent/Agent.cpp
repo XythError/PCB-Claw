@@ -15,7 +15,7 @@ Agent::Agent(Gateway&       gw,
              LaneQueue&     queue,
              ConfigManager& config)
     : _gw(gw), _tools(tools), _queue(queue), _config(config),
-      _llm(tools), _workflows(tools)
+      _llm(tools), _workflows(tools), _promptBuilder(tools, config)
 {}
 
 bool Agent::configure() {
@@ -49,9 +49,28 @@ bool Agent::begin() {
     // Lane setup — each hardware resource gets its own lane
     _queue.addLane("llm",     [this](const Task& t) -> bool {
         char result[LLM_RESPONSE_BUF] = {};
-        char ctx[512] = {};
-        _loadWorkspaceContext(ctx, sizeof(ctx));
-        bool ok = _llm.reason(t.payload, ctx, result, sizeof(result));
+
+        // Build the dynamic system prompt using PSRAM when available.
+        char* promptBuf = nullptr;
+#ifndef NATIVE_BUILD
+        promptBuf = (char*)heap_caps_malloc(PROMPT_BUF_LEN,
+                                             MALLOC_CAP_SPIRAM |
+                                             MALLOC_CAP_8BIT);
+        if (!promptBuf) promptBuf = (char*)malloc(PROMPT_BUF_LEN);
+#else
+        promptBuf = (char*)malloc(PROMPT_BUF_LEN);
+#endif
+        const char* sysPrompt = nullptr;
+        if (promptBuf) {
+            promptBuf[0] = '\0';
+            _promptBuilder.build(promptBuf, PROMPT_BUF_LEN);
+            sysPrompt = promptBuf;
+        }
+
+        bool ok = _llm.reason(t.payload, nullptr, result, sizeof(result),
+                               sysPrompt);
+        if (promptBuf) free(promptBuf);
+
         Message resp = Message::make(t.reply_channel, "agent", result,
                                      MessageType::RESPONSE);
         _gw.send(resp);
@@ -134,7 +153,7 @@ bool Agent::begin() {
                 while (*p && *p != '"' && i < sizeof(cmd)-1) cmd[i++]=*p++;
                 cmd[i] = '\0';
             }
-            char replyBuf[256];
+            char replyBuf[512];
             if (strcmp(cmd, "status") == 0) {
                 statusJson(replyBuf, sizeof(replyBuf));
             } else if (strcmp(cmd, "help") == 0) {
@@ -143,6 +162,9 @@ bool Agent::begin() {
                 snprintf(replyBuf, sizeof(replyBuf),
                          "PCB-Claw Commands:\n"
                          "/status /help /workflows /reset\n"
+                         "/remember <text>  — add to long-term memory\n"
+                         "/note <text>      — add to today's daily note\n"
+                         "/memory           — show memory file path\n"
                          "\nTools:\n%s", toolList);
             } else if (strcmp(cmd, "workflows") == 0) {
                 snprintf(replyBuf, sizeof(replyBuf),
@@ -156,6 +178,36 @@ bool Agent::begin() {
                 delay(500); ESP.restart();
 #endif
                 return true;
+            } else if (strcmp(cmd, "remember") == 0) {
+                // Extract text after "/remember " from the args field
+                char text[256] = {};
+                _extractCommandText(t.payload, "/remember ", text, sizeof(text));
+                if (text[0] != '\0') {
+                    _promptBuilder.appendMemory(text);
+                    snprintf(replyBuf, sizeof(replyBuf), "Remembered.");
+                } else {
+                    snprintf(replyBuf, sizeof(replyBuf),
+                             "Usage: /remember <text>");
+                }
+            } else if (strcmp(cmd, "note") == 0) {
+                // Extract text after "/note " from the args field
+                char text[256] = {};
+                _extractCommandText(t.payload, "/note ", text, sizeof(text));
+                if (text[0] != '\0') {
+                    _promptBuilder.appendDailyNote(text);
+                    snprintf(replyBuf, sizeof(replyBuf), "Note saved.");
+                } else {
+                    snprintf(replyBuf, sizeof(replyBuf),
+                             "Usage: /note <text>");
+                }
+            } else if (strcmp(cmd, "memory") == 0) {
+                const char* ws = _config.get("workspace_path", "/workspace");
+                snprintf(replyBuf, sizeof(replyBuf),
+                         "Memory: %s/MEMORY.md\n"
+                         "Notes:  %s/notes/\n"
+                         "Use /remember <text> to add a fact.\n"
+                         "Use /note <text> to add a daily note.",
+                         ws, ws);
             } else {
                 snprintf(replyBuf, sizeof(replyBuf),
                          "Unknown command: /%s  (try /help)", cmd);
@@ -260,4 +312,54 @@ void Agent::_saveToWorkspace(const char* key, const char* value) {
 #else
     (void)key; (void)value;
 #endif
+}
+
+void Agent::setWebServerRunning(bool running) {
+    _promptBuilder.setWebServerRunning(running);
+}
+
+// Extract the text that follows prefix in the JSON "args" field of
+// a command task payload.  The args field holds the escaped original
+// message content, e.g. {"command":"remember","args":"/remember hello"}.
+void Agent::_extractCommandText(const char* payload,
+                                 const char* prefix,
+                                 char*       out,
+                                 size_t      outLen) {
+    out[0] = '\0';
+    const char* p = strstr(payload, "\"args\":\"");
+    if (!p) return;
+    p += 8;  // skip "args":"
+
+    // Find prefix inside the args value
+    size_t pfxLen = strlen(prefix);
+    size_t i = 0;
+    while (*p && *p != '"') {
+        bool match = true;
+        for (size_t j = 0; j < pfxLen; ++j) {
+            if (!p[j] || p[j] == '"') { match = false; break; }
+            char a = p[j], b = prefix[j];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) { match = false; break; }
+        }
+        if (match) {
+            p += pfxLen;
+            i = 0;
+            while (*p && *p != '"' && i < outLen - 1) {
+                if (*p == '\\' && *(p + 1)) {
+                    ++p;
+                    if (*p == 'n')       out[i++] = '\n';
+                    else if (*p == '"')  out[i++] = '"';
+                    else if (*p == '\\') out[i++] = '\\';
+                    else                 out[i++] = *p;
+                } else {
+                    out[i++] = *p;
+                }
+                ++p;
+            }
+            break;
+        }
+        ++p;
+    }
+    out[i] = '\0';
 }

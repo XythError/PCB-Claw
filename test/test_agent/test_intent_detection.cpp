@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────────
 // test_intent_detection.cpp — Unit tests for IntentDetector,
-//   TaskDecomposer, WorkflowEngine, and ConfigManager.
+//   TaskDecomposer, WorkflowEngine, ConfigManager,
+//   PromptBuilder, and MemoryTool.
 // Runs on native platform (no hardware required).
 // ─────────────────────────────────────────────────────────────────
 
@@ -8,9 +9,11 @@
 #include "../../src/agent/IntentDetector.h"
 #include "../../src/agent/TaskDecomposer.h"
 #include "../../src/agent/WorkflowEngine.h"
+#include "../../src/agent/PromptBuilder.h"
 #include "../../src/config/ConfigManager.h"
 #include "../../src/tools/ToolRegistry.h"
 #include "../../src/tools/GpioTool.h"
+#include "../../src/tools/MemoryTool.h"
 #include <string.h>
 
 void setUp()    {}
@@ -305,6 +308,198 @@ void test_message_make_response() {
     TEST_ASSERT_FALSE(resp.requires_reply);
 }
 
+// ── PromptBuilder tests ───────────────────────────────────────────
+
+void test_prompt_builder_build_not_empty() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    size_t n = pb.build(buf, sizeof(buf));
+    TEST_ASSERT_GREATER_THAN(0, (int)n);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "## Identity"));
+}
+
+void test_prompt_builder_identity_has_toolcount() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "Tool count:"));
+}
+
+void test_prompt_builder_skills_section() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "## Skills"));
+    // Skills section should mention the gpio tool
+    TEST_ASSERT_NOT_NULL(strstr(buf, "gpio"));
+}
+
+void test_prompt_builder_memory_section() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "## Memory"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "### Long-term"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "### Recent Notes"));
+}
+
+void test_prompt_builder_http_status_not_running() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    pb.setWebServerRunning(false);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "HTTP Server: not running"));
+}
+
+void test_prompt_builder_http_status_running() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+
+    PromptBuilder pb(reg, cfg);
+    pb.setWebServerRunning(true);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "HTTP Server: running"));
+}
+
+void test_prompt_builder_fs_tree_not_included_by_default() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+    // PCBCLAW_PROMPT_INCLUDE_TREE not set → defaults to 0
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NULL(strstr(buf, "## Filesystem"));
+}
+
+void test_prompt_builder_fs_tree_included_when_enabled() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    cfg.set("workspace_path", "/workspace");
+    cfg.set("PCBCLAW_PROMPT_INCLUDE_TREE", "1");
+
+    PromptBuilder pb(reg, cfg);
+    char buf[PROMPT_BUF_LEN];
+    pb.build(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "## Filesystem"));
+}
+
+void test_prompt_builder_append_memory_succeeds_on_native() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    PromptBuilder pb(reg, cfg);
+    // On native build, appendMemory always returns true (no FS)
+    TEST_ASSERT_TRUE(pb.appendMemory("test fact"));
+}
+
+void test_prompt_builder_append_daily_note_succeeds_on_native() {
+    GpioTool gt;
+    ToolRegistry reg;
+    reg.add(&gt);
+    ConfigManager cfg;
+    PromptBuilder pb(reg, cfg);
+    TEST_ASSERT_TRUE(pb.appendDailyNote("test note"));
+}
+
+void test_prompt_builder_today_note_path() {
+    char path[64];
+    PromptBuilder::todayNotePath(path, sizeof(path));
+    // On native build, day is always 0
+    TEST_ASSERT_NOT_NULL(strstr(path, "/workspace/notes/"));
+    TEST_ASSERT_NOT_NULL(strstr(path, ".md"));
+}
+
+// ── MemoryTool tests ──────────────────────────────────────────────
+
+void test_memory_tool_name() {
+    MemoryTool mt;
+    TEST_ASSERT_EQUAL_STRING("memory", mt.name());
+}
+
+void test_memory_tool_write_succeeds_on_native() {
+    MemoryTool mt;
+    char result[256] = {};
+    bool ok = mt.execute("{\"op\":\"write\",\"text\":\"hello world\"}",
+                          result, sizeof(result));
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_NOT_NULL(strstr(result, "\"ok\":true"));
+}
+
+void test_memory_tool_note_succeeds_on_native() {
+    MemoryTool mt;
+    char result[256] = {};
+    bool ok = mt.execute("{\"op\":\"note\",\"text\":\"daily entry\"}",
+                          result, sizeof(result));
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_NOT_NULL(strstr(result, "\"ok\":true"));
+}
+
+void test_memory_tool_read_returns_content() {
+    MemoryTool mt;
+    char result[512] = {};
+    bool ok = mt.execute("{\"op\":\"read\"}", result, sizeof(result));
+    // On native, read returns a stub JSON string — just check it succeeds
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_GREATER_THAN(0, (int)strlen(result));
+}
+
+void test_memory_tool_write_missing_text_fails() {
+    MemoryTool mt;
+    char result[256] = {};
+    bool ok = mt.execute("{\"op\":\"write\"}", result, sizeof(result));
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_NOT_NULL(strstr(result, "error"));
+}
+
+void test_memory_tool_unknown_op_fails() {
+    MemoryTool mt;
+    char result[256] = {};
+    bool ok = mt.execute("{\"op\":\"delete\"}", result, sizeof(result));
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_NOT_NULL(strstr(result, "error"));
+}
+
 // ─────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
@@ -352,6 +547,27 @@ int main(int argc, char** argv) {
     RUN_TEST(test_message_is_not_command);
     RUN_TEST(test_message_command_name);
     RUN_TEST(test_message_make_response);
+
+    // PromptBuilder
+    RUN_TEST(test_prompt_builder_build_not_empty);
+    RUN_TEST(test_prompt_builder_identity_has_toolcount);
+    RUN_TEST(test_prompt_builder_skills_section);
+    RUN_TEST(test_prompt_builder_memory_section);
+    RUN_TEST(test_prompt_builder_http_status_not_running);
+    RUN_TEST(test_prompt_builder_http_status_running);
+    RUN_TEST(test_prompt_builder_fs_tree_not_included_by_default);
+    RUN_TEST(test_prompt_builder_fs_tree_included_when_enabled);
+    RUN_TEST(test_prompt_builder_append_memory_succeeds_on_native);
+    RUN_TEST(test_prompt_builder_append_daily_note_succeeds_on_native);
+    RUN_TEST(test_prompt_builder_today_note_path);
+
+    // MemoryTool
+    RUN_TEST(test_memory_tool_name);
+    RUN_TEST(test_memory_tool_write_succeeds_on_native);
+    RUN_TEST(test_memory_tool_note_succeeds_on_native);
+    RUN_TEST(test_memory_tool_read_returns_content);
+    RUN_TEST(test_memory_tool_write_missing_text_fails);
+    RUN_TEST(test_memory_tool_unknown_op_fails);
 
     return UNITY_END();
 }

@@ -48,36 +48,67 @@ public:
     const LlmConfig& config() const      { return _cfg; }
 
     // Run one reasoning step.
-    //   userText   — user's message (already intent-classified)
-    //   contextJson — optional JSON workspace context string
-    //   resultBuf  — output buffer for assistant reply
-    //   resultLen  — size of resultBuf
+    //   userText             — user's message (already intent-classified)
+    //   contextJson          — optional JSON workspace context string
+    //                          (ignored when systemPromptOverride is set)
+    //   resultBuf            — output buffer for assistant reply
+    //   resultLen            — size of resultBuf
+    //   systemPromptOverride — if non-null, replaces the config system
+    //                          prompt (e.g. output from PromptBuilder)
     // Returns true on success.
     bool reason(const char* userText,
                 const char* contextJson,
                 char*       resultBuf,
-                size_t      resultLen)
+                size_t      resultLen,
+                const char* systemPromptOverride = nullptr)
     {
         if (!userText || resultLen == 0) return false;
 
 #ifndef NATIVE_BUILD
-        // Build the request body
         char toolSchemas[1024] = {};
         _tools.schemasJson(toolSchemas, sizeof(toolSchemas));
 
+        // Build system message: use override if provided, otherwise
+        // fall back to the legacy format (config prompt + tools + ctx).
+        const char* sysMsg  = nullptr;
+        char*       sysBuf  = nullptr;
+
+        if (systemPromptOverride) {
+            sysMsg = systemPromptOverride;
+        } else {
+            size_t baseLen = strlen(_cfg.system_prompt);
+            size_t toolLen = strlen(toolSchemas);
+            size_t ctxLen  = contextJson ? strlen(contextJson) : 2;
+            size_t total   = baseLen + toolLen + ctxLen + 32;
+            sysBuf = (char*)malloc(total);
+            if (!sysBuf) {
+                snprintf(resultBuf, resultLen, "{\"error\":\"OOM\"}");
+                return false;
+            }
+            snprintf(sysBuf, total,
+                     "%s\nAvailable tools: %s\nContext: %s",
+                     _cfg.system_prompt, toolSchemas,
+                     contextJson ? contextJson : "{}");
+            sysMsg = sysBuf;
+        }
+
+        bool ok;
         if (strcmp(_cfg.provider, "openai") == 0 ||
             strcmp(_cfg.provider, "custom") == 0) {
-            return _callOpenAI(userText, contextJson,
-                               toolSchemas, resultBuf, resultLen);
+            ok = _callOpenAI(userText, sysMsg, resultBuf, resultLen);
         } else if (strcmp(_cfg.provider, "anthropic") == 0) {
-            return _callAnthropic(userText, contextJson,
-                                  toolSchemas, resultBuf, resultLen);
+            ok = _callAnthropic(userText, sysMsg, resultBuf, resultLen);
+        } else {
+            snprintf(resultBuf, resultLen,
+                     "{\"error\":\"unknown provider '%s'\"}", _cfg.provider);
+            ok = false;
         }
-        snprintf(resultBuf, resultLen,
-                 "{\"error\":\"unknown provider '%s'\"}", _cfg.provider);
-        return false;
+
+        if (sysBuf) free(sysBuf);
+        return ok;
 #else
         // Native / test: echo the input
+        (void)contextJson; (void)systemPromptOverride;
         snprintf(resultBuf, resultLen,
                  "{\"reply\":\"[simulated] received: %s\"}", userText);
         return true;
@@ -90,8 +121,7 @@ private:
 
 #ifndef NATIVE_BUILD
     bool _callOpenAI(const char* userText,
-                     const char* contextJson,
-                     const char* toolSchemas,
+                     const char* sysMsg,
                      char*       out, size_t outLen)
     {
         const char* endpoint = (_cfg.endpoint[0] != '\0')
@@ -105,14 +135,6 @@ private:
 
         JsonArray msgs = body["messages"].to<JsonArray>();
 
-        // System message (compact)
-        char sysMsg[640];
-        snprintf(sysMsg, sizeof(sysMsg),
-                 "%s\nAvailable tools: %s\n"
-                 "Context: %s",
-                 _cfg.system_prompt,
-                 toolSchemas,
-                 contextJson ? contextJson : "{}");
         JsonObject sys = msgs.add<JsonObject>();
         sys["role"]    = "system";
         sys["content"] = sysMsg;
@@ -164,8 +186,7 @@ private:
     }
 
     bool _callAnthropic(const char* userText,
-                        const char* contextJson,
-                        const char* toolSchemas,
+                        const char* sysMsg,
                         char*       out, size_t outLen)
     {
         const char* endpoint = "https://api.anthropic.com/v1/messages";
@@ -173,13 +194,7 @@ private:
         JsonDocument body;
         body["model"]      = _cfg.model;
         body["max_tokens"] = _cfg.max_tokens;
-
-        char sysMsg[640];
-        snprintf(sysMsg, sizeof(sysMsg),
-                 "%s\nTools: %s\nContext: %s",
-                 _cfg.system_prompt, toolSchemas,
-                 contextJson ? contextJson : "{}");
-        body["system"] = sysMsg;
+        body["system"]     = sysMsg;
 
         JsonArray msgs = body["messages"].to<JsonArray>();
         JsonObject user = msgs.add<JsonObject>();
