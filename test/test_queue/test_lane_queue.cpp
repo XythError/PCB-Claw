@@ -136,6 +136,41 @@ void test_all_idle_initially() {
     TEST_ASSERT_FALSE(q.allIdle());
 }
 
+// ── Emergency stop tests ──────────────────────────────────────────
+
+void test_emergency_stop_rejects_enqueue() {
+    LaneQueue q;
+    q.addLane("default", testHandler);
+    q.begin();
+
+    q.emergencyStop();
+    Task t = Task::make("blocked", "default", "{}");
+    TEST_ASSERT_FALSE(q.enqueue(t));
+    TEST_ASSERT_TRUE(q.isStopped());
+}
+
+void test_clear_stop_resumes_enqueue() {
+    LaneQueue q;
+    q.addLane("default", testHandler);
+    q.begin();
+
+    q.emergencyStop();
+    q.clearStop();
+    TEST_ASSERT_FALSE(q.isStopped());
+    Task t = Task::make("resumed", "default", "{}");
+    TEST_ASSERT_TRUE(q.enqueue(t));
+}
+
+// ── Per-lane priority tests ───────────────────────────────────────
+
+void test_lane_added_with_custom_priority() {
+    LaneQueue q;
+    // addLane must accept the optional priority parameter without error
+    TEST_ASSERT_TRUE(q.addLane("hw",  testHandler, LANE_PRIORITY_HIGH));
+    TEST_ASSERT_TRUE(q.addLane("llm", testHandler, LANE_PRIORITY_LOW));
+    TEST_ASSERT_TRUE(q.addLane("def", testHandler));  // default priority
+}
+
 // ─────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
@@ -152,6 +187,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_pending_on_nonexistent_lane);
     RUN_TEST(test_is_busy_initially_false);
     RUN_TEST(test_all_idle_initially);
+    RUN_TEST(test_emergency_stop_rejects_enqueue);
+    RUN_TEST(test_clear_stop_resumes_enqueue);
+    RUN_TEST(test_lane_added_with_custom_priority);
 
     return UNITY_END();
 }

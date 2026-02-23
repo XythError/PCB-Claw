@@ -1,4 +1,5 @@
 #include "Agent.h"
+#include "../memory/PsramAllocator.h"
 
 #ifndef NATIVE_BUILD
 #  include <Arduino.h>
@@ -46,36 +47,34 @@ bool Agent::configure() {
 }
 
 bool Agent::begin() {
-    // Lane setup — each hardware resource gets its own lane
+    // Lane setup — each hardware resource gets its own lane.
+    // Hardware lanes run at higher FreeRTOS priority than the LLM lane
+    // so that GPIO/I2C/SPI operations remain responsive even while the
+    // agent is waiting for an LLM response.
     _queue.addLane("llm",     [this](const Task& t) -> bool {
         char result[LLM_RESPONSE_BUF] = {};
 
-        // Build the dynamic system prompt using PSRAM when available.
-        char* promptBuf = nullptr;
-#ifndef NATIVE_BUILD
-        promptBuf = (char*)heap_caps_malloc(PROMPT_BUF_LEN,
-                                             MALLOC_CAP_SPIRAM |
-                                             MALLOC_CAP_8BIT);
-        if (!promptBuf) promptBuf = (char*)malloc(PROMPT_BUF_LEN);
-#else
-        promptBuf = (char*)malloc(PROMPT_BUF_LEN);
-#endif
+        // Allocate the system-prompt buffer from the named PSRAM pool
+        // so it does not fragment the internal heap used by WiFi/TLS.
+        char* promptBuf = static_cast<char*>(
+            PsramAllocator::alloc(PsramPool::LLM_CTX));
         const char* sysPrompt = nullptr;
         if (promptBuf) {
             promptBuf[0] = '\0';
-            _promptBuilder.build(promptBuf, PROMPT_BUF_LEN);
+            _promptBuilder.build(promptBuf,
+                PsramAllocator::poolSize(PsramPool::LLM_CTX));
             sysPrompt = promptBuf;
         }
 
         bool ok = _llm.reason(t.payload, nullptr, result, sizeof(result),
                                sysPrompt);
-        if (promptBuf) free(promptBuf);
+        if (promptBuf) PsramAllocator::free(PsramPool::LLM_CTX, promptBuf);
 
         Message resp = Message::make(t.reply_channel, "agent", result,
                                      MessageType::RESPONSE);
         _gw.send(resp);
         return ok;
-    });
+    }, LANE_PRIORITY_LOW);   // LLM lane: lowest priority — preemptable
 
     _queue.addLane("gpio",    [this](const Task& t) -> bool {
         char result[TOOL_RESULT_LEN] = {};
@@ -84,7 +83,7 @@ bool Agent::begin() {
                                      MessageType::RESPONSE);
         _gw.send(resp);
         return ok;
-    });
+    }, LANE_PRIORITY_HIGH);   // hardware: high priority, responsive to interrupts
 
     _queue.addLane("i2c",     [this](const Task& t) -> bool {
         char result[TOOL_RESULT_LEN] = {};
@@ -93,7 +92,7 @@ bool Agent::begin() {
                                      MessageType::RESPONSE);
         _gw.send(resp);
         return ok;
-    });
+    }, LANE_PRIORITY_HIGH);
 
     _queue.addLane("spi",     [this](const Task& t) -> bool {
         char result[TOOL_RESULT_LEN] = {};
@@ -102,7 +101,7 @@ bool Agent::begin() {
                                      MessageType::RESPONSE);
         _gw.send(resp);
         return ok;
-    });
+    }, LANE_PRIORITY_HIGH);
 
     _queue.addLane("http",    [this](const Task& t) -> bool {
         char result[TOOL_RESULT_LEN] = {};
@@ -111,7 +110,16 @@ bool Agent::begin() {
                                      MessageType::RESPONSE);
         _gw.send(resp);
         return ok;
-    });
+    }, LANE_PRIORITY_MID);
+
+    _queue.addLane("script",  [this](const Task& t) -> bool {
+        char result[TOOL_RESULT_LEN] = {};
+        bool ok = _tools.invoke("script", t.payload, result, sizeof(result));
+        Message resp = Message::make(t.reply_channel, "agent", result,
+                                     MessageType::RESPONSE);
+        _gw.send(resp);
+        return ok;
+    }, LANE_PRIORITY_LOW);   // script: same priority as LLM — CPU-intensive
 
     _queue.addLane("default", [this](const Task& t) -> bool {
         // Handles: workflow:run, status:query, command:exec, config:set

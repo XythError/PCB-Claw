@@ -26,6 +26,7 @@ enum class Intent : uint8_t {
     WORKFLOW_RUN = 6,  // Run a named workflow
     STATUS_QUERY = 7,  // Query system/sensor status
     CONFIG_CHANGE= 8,  // Modify agent configuration
+    SCRIPT_RUN   = 9,  // Execute a Lua script
     UNKNOWN      = 0xFF,
 };
 
@@ -40,6 +41,7 @@ inline const char* intentName(Intent i) {
         case Intent::WORKFLOW_RUN:  return "workflow_run";
         case Intent::STATUS_QUERY:  return "status_query";
         case Intent::CONFIG_CHANGE: return "config_change";
+        case Intent::SCRIPT_RUN:    return "script_run";
         default:                    return "unknown";
     }
 }
@@ -78,6 +80,9 @@ static constexpr IntentKeyword DEFAULT_INTENT_KEYWORDS[] = {
     { "request",   Intent::HTTP_REQUEST },
     { "api",       Intent::HTTP_REQUEST },
     { "url",       Intent::HTTP_REQUEST },
+    // Script / Lua  (checked before Workflow so "run lua" → SCRIPT_RUN)
+    { "lua",       Intent::SCRIPT_RUN },
+    { "script",    Intent::SCRIPT_RUN },
     // Workflow
     { "workflow",  Intent::WORKFLOW_RUN },
     { "run",       Intent::WORKFLOW_RUN },

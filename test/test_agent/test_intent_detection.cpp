@@ -77,6 +77,15 @@ void test_intent_status() {
                       IntentDetector::detect("how long uptime?"));
 }
 
+void test_intent_script_run() {
+    TEST_ASSERT_EQUAL(Intent::SCRIPT_RUN,
+                      IntentDetector::detect("lua print(1+1)"));
+    TEST_ASSERT_EQUAL(Intent::SCRIPT_RUN,
+                      IntentDetector::detect("execute this script for me"));
+    TEST_ASSERT_EQUAL(Intent::SCRIPT_RUN,
+                      IntentDetector::detect("run a lua function"));
+}
+
 void test_intent_case_insensitive() {
     TEST_ASSERT_EQUAL(Intent::GPIO_CONTROL,
                       IntentDetector::detect("SET THE LED TO HIGH"));
@@ -133,6 +142,15 @@ void test_decompose_origin_msg_set() {
     Message m = Message::make("serial", "user", "hello");
     auto tasks = TaskDecomposer::decompose(m, Intent::CHAT);
     TEST_ASSERT_EQUAL_STRING(m.id, tasks.tasks[0].origin_msg);
+}
+
+void test_decompose_script_produces_script_task() {
+    Message m = Message::make("serial", "user", "lua print(1+1)");
+    auto tasks = TaskDecomposer::decompose(m, Intent::SCRIPT_RUN);
+    TEST_ASSERT_EQUAL(1, tasks.count);
+    TEST_ASSERT_EQUAL_STRING("script:exec", tasks.tasks[0].name);
+    TEST_ASSERT_EQUAL_STRING("script",      tasks.tasks[0].lane);
+    TEST_ASSERT_NOT_NULL(strstr(tasks.tasks[0].payload, "\"op\":\"exec\""));
 }
 
 // ── WorkflowEngine tests ──────────────────────────────────────────
@@ -514,6 +532,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_intent_http);
     RUN_TEST(test_intent_workflow);
     RUN_TEST(test_intent_status);
+    RUN_TEST(test_intent_script_run);
     RUN_TEST(test_intent_case_insensitive);
     RUN_TEST(test_message_intent_command);
     RUN_TEST(test_message_intent_chat);
@@ -524,6 +543,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_decompose_command_produces_command_task);
     RUN_TEST(test_decompose_workflow_produces_workflow_task);
     RUN_TEST(test_decompose_origin_msg_set);
+    RUN_TEST(test_decompose_script_produces_script_task);
 
     // WorkflowEngine
     RUN_TEST(test_workflow_parse_simple);
