@@ -79,6 +79,10 @@ public:
                 result.add(_makeConfigTask(msg));
                 break;
 
+            case Intent::SCRIPT_RUN:
+                result.add(_makeScriptTask(msg));
+                break;
+
             default:
                 // Unknown intent: fall back to LLM
                 result.add(_makeLlmTask(msg, "fallback"));
@@ -171,6 +175,20 @@ private:
                  "{\"cmd\":\"%s\"}", _escape(msg.content).buf);
         Task t = Task::make("config:set", "default", payload,
                             msg.reply_channel, 2);
+        strncpy(t.origin_msg, msg.id, MSG_ID_LEN - 1);
+        return t;
+    }
+
+    static Task _makeScriptTask(const Message& msg) {
+        // Pass the raw message text as inline Lua code.
+        // The ScriptTool "exec" op will execute it via the ScriptEngine.
+        char payload[TASK_PAYLOAD_LEN];
+        snprintf(payload, sizeof(payload),
+                 "{\"op\":\"exec\","
+                 "\"code\":\"%s\"}",
+                 _escape(msg.content).buf);
+        Task t = Task::make("script:exec", "script", payload,
+                            msg.reply_channel, 1);
         strncpy(t.origin_msg, msg.id, MSG_ID_LEN - 1);
         return t;
     }

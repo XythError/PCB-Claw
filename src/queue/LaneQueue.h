@@ -37,6 +37,12 @@ static constexpr uint8_t LANE_QUEUE_DEPTH   = 8;
 static constexpr uint8_t LANE_QUEUE_MAX_LANES = 8;
 static constexpr uint32_t LANE_WORKER_STACK  = 4096;
 
+// Default lane priorities (FreeRTOS task priority).
+// Higher number = higher priority.  Keep below system tasks (~23).
+static constexpr uint8_t LANE_PRIORITY_LOW  = 1;  // LLM inference
+static constexpr uint8_t LANE_PRIORITY_MID  = 2;  // general / workflow
+static constexpr uint8_t LANE_PRIORITY_HIGH = 3;  // hardware (GPIO/I2C/SPI)
+
 // Callback type: executed by the lane worker when a task is dequeued.
 // Returns true on success, false on failure.
 #ifndef NATIVE_BUILD
@@ -49,7 +55,9 @@ using TaskHandler = std::function<bool(const Task&)>;
 struct Lane {
     char        name[TASK_LANE_LEN] = {};
     TaskHandler handler             = nullptr;
+    uint8_t     priority            = LANE_PRIORITY_MID;  // FreeRTOS priority
     bool        active              = false;
+    volatile bool* stopped          = nullptr;  // points to LaneQueue::_stopped
 
 #ifndef NATIVE_BUILD
     QueueHandle_t     queue   = nullptr;
@@ -72,15 +80,21 @@ public:
     ~LaneQueue();
 
     // Register a named lane with its handler function.
+    // priority controls the FreeRTOS worker task priority:
+    //   LANE_PRIORITY_LOW  (1) — LLM lane (can be pre-empted by hardware)
+    //   LANE_PRIORITY_MID  (2) — default / workflow tasks
+    //   LANE_PRIORITY_HIGH (3) — hardware control (GPIO, I2C, SPI)
     // Must be called before begin().
-    bool addLane(const char* laneName, TaskHandler handler);
+    bool addLane(const char* laneName, TaskHandler handler,
+                 uint8_t priority = LANE_PRIORITY_MID);
 
     // Start all lane workers (FreeRTOS tasks on ESP32)
     void begin();
 
     // Enqueue a task.  The lane is selected from task.lane.
     // If no matching lane exists, uses the "default" lane.
-    // Returns false if the target lane queue is full.
+    // Returns false if the target lane queue is full or emergency stop
+    // is active.
     bool enqueue(const Task& task);
 
     // Returns true if the named lane is currently processing a task.
@@ -92,9 +106,17 @@ public:
     // Number of tasks waiting in a lane's queue
     uint8_t pending(const char* laneName) const;
 
+    // Emergency stop: prevents new tasks from starting in all lanes.
+    // Tasks currently executing will complete naturally.
+    // Call clearStop() to resume normal operation.
+    void emergencyStop()  { _stopped = true; }
+    void clearStop()      { _stopped = false; }
+    bool isStopped() const { return _stopped; }
+
 private:
     Lane    _lanes[LANE_QUEUE_MAX_LANES] = {};
     uint8_t _count = 0;
+    volatile bool _stopped = false;
 
     Lane*   _findLane(const char* name);
     const Lane* _findLane(const char* name) const;
@@ -117,11 +139,14 @@ inline LaneQueue::~LaneQueue() {
 #endif
 }
 
-inline bool LaneQueue::addLane(const char* laneName, TaskHandler handler) {
+inline bool LaneQueue::addLane(const char* laneName, TaskHandler handler,
+                                uint8_t priority) {
     if (_count >= LANE_QUEUE_MAX_LANES || !laneName || !handler) return false;
     Lane& l = _lanes[_count++];
     strncpy(l.name, laneName, TASK_LANE_LEN - 1);
-    l.handler = handler;
+    l.handler  = handler;
+    l.priority = priority;
+    l.stopped  = &_stopped;
 #ifndef NATIVE_BUILD
     l.queue = xQueueCreate(LANE_QUEUE_DEPTH, sizeof(Task));
     l.mutex = xSemaphoreCreateMutex();
@@ -141,7 +166,7 @@ inline void LaneQueue::begin() {
                     _lanes[i].name,
                     LANE_WORKER_STACK,
                     &_lanes[i],
-                    2,                 // priority (above idle, below main)
+                    _lanes[i].priority,    // per-lane FreeRTOS priority
                     &_lanes[i].worker);
     }
 #endif
@@ -153,6 +178,12 @@ inline void LaneQueue::_workerTask(void* pvParams) {
     Task  t;
     for (;;) {
         if (xQueueReceive(lane->queue, &t, portMAX_DELAY) == pdTRUE) {
+            // Emergency stop: intentionally discard the dequeued task
+            // so the queue drains without executing new operations.
+            // The task is lost by design — stop is a safety measure.
+            // Call clearStop() to resume normal operation.
+            if (lane->stopped && *lane->stopped) continue;
+
             xSemaphoreTake(lane->mutex, portMAX_DELAY);
             lane->is_busy = true;
             xSemaphoreGive(lane->mutex);
@@ -170,6 +201,7 @@ inline void LaneQueue::_workerTask(void* pvParams) {
 #endif
 
 inline bool LaneQueue::enqueue(const Task& task) {
+    if (_stopped) return false;  // reject new tasks during emergency stop
     Lane* l = _findLane(task.lane);
     if (!l) l = _findLane("default");
     if (!l || !l->active) return false;
