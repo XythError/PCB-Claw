@@ -24,6 +24,7 @@
 #include "tools/I2cTool.h"
 #include "tools/SpiTool.h"
 #include "tools/HttpTool.h"
+#include "tools/MemoryTool.h"
 
 // Agent
 #include "agent/Agent.h"
@@ -44,10 +45,11 @@ static LaneQueue     laneQueue;
 static ToolRegistry  toolRegistry;
 
 // Tools
-static GpioTool gpioTool;
-static I2cTool  i2cTool;
-static SpiTool  spiTool;
-static HttpTool httpTool;
+static GpioTool   gpioTool;
+static I2cTool    i2cTool;
+static SpiTool    spiTool;
+static HttpTool   httpTool;
+static MemoryTool memoryTool;
 
 // Channels (created after config is loaded for WiFi credentials)
 static SerialChannel* serialChannel  = nullptr;
@@ -110,6 +112,7 @@ void setup() {
     toolRegistry.add(&i2cTool);
     toolRegistry.add(&spiTool);
     toolRegistry.add(&httpTool);
+    toolRegistry.add(&memoryTool);
 
     // Initialise tools that need hardware setup
     i2cTool.begin();
@@ -153,6 +156,7 @@ void setup() {
         webServer = new WebServer(*agent, toolRegistry,
                                   (uint16_t)configMgr.getInt("web_port", 80));
         webServer->begin();
+        agent->setWebServerRunning(true);
     }
 
     Serial.printf("[Boot] %d tools, %d channels ready\n",

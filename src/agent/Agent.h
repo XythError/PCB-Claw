@@ -7,6 +7,7 @@
 #include "TaskDecomposer.h"
 #include "ReasoningLoop.h"
 #include "WorkflowEngine.h"
+#include "PromptBuilder.h"
 #include "../config/ConfigManager.h"
 
 // ─────────────────────────────────────────────────────────────────
@@ -51,6 +52,10 @@ public:
     // Returns a status JSON summary
     void statusJson(char* buf, size_t len) const;
 
+    // Notify the agent whether the HTTP web server is running.
+    // Used by PromptBuilder to include accurate server status in the prompt.
+    void setWebServerRunning(bool running);
+
 private:
     Gateway&       _gw;
     ToolRegistry&  _tools;
@@ -58,6 +63,7 @@ private:
     ConfigManager& _config;
     ReasoningLoop  _llm;
     WorkflowEngine _workflows;
+    PromptBuilder  _promptBuilder;
 
     uint32_t _processed = 0;
     uint32_t _errors    = 0;
@@ -74,4 +80,11 @@ private:
     // Workspace helpers
     void _loadWorkspaceContext(char* buf, size_t len);
     void _saveToWorkspace(const char* key, const char* value);
+
+    // Extract text that follows prefix inside a command task payload's
+    // "args" JSON field (e.g. prefix="/remember " extracts the fact text).
+    static void _extractCommandText(const char* payload,
+                                     const char* prefix,
+                                     char*       out,
+                                     size_t      outLen);
 };
